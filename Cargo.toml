@@ -6,3 +6,4 @@ license = "MIT"
 description = "Local Linux virtual camera with adjustable cosmetic retouching"
 
 [dependencies]
+rustface = { version = "0.1.7", default-features = false }

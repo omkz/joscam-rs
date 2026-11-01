@@ -151,3 +151,60 @@ previous defaults. Set all three controls to zero for exact passthrough.
 Youth is cosmetic smoothing/lighting, not age reconstruction or wrinkle-specific
 removal. There is still no face detection, landmark tracking or skin segmentation.
 For Chrome, omit `--preview` and use your usual virtual output device.
+
+## K-Beauty with local face detection
+
+One-time setup (requires Git and sha256sum):
+
+```bash
+bash scripts/download-face-model.sh
+cargo run --release -- --preview --preset kbeauty
+```
+
+K-Beauty adds soft skin brightening, a subtle rosy tint, and a gentle glow.
+It loads the local SeetaFace model through the Rust `rustface` library. The
+small grayscale detection input is processed on a background thread at up to
+10 detection requests/second. Only the largest detected face is followed.
+The video pipeline never waits for inference; queued work is bounded and
+old results expire after 350 ms. This can create a short delay when moving
+quickly. No detected face means **no cosmetic effects** in tracking mode.
+Terminal status reads `face detected` or `face searching`.
+
+```bash
+cargo run --release -- --preview --preset kbeauty --rosy 0.25 --glow 0.5 --skin-brightening 0.45
+```
+
+`--rosy` and `--glow` each range from 0 to 1 and default to 0 outside the
+K-Beauty preset. Explicit values override preset defaults in either order.
+K-Beauty defaults: strength 0.70, face light 0.35, skin brightening 0.35,
+rosy 0.35, glow 0.40. Use `--face-model PATH` to enable tracking with another
+preset; default K-Beauty path is `models/seeta_fd_frontal_v1.0.bin` relative
+to the working directory. Run from the project root or supply an absolute path.
+Omit `--preview` for virtual output to Chrome as before.
+
+This is **face-box detection with position smoothing, not facial landmarks**.
+Eye/mouth protection uses approximate box-relative regions; it is not precise
+makeup placement. No lip tint, blush, eye enlargement or jaw reshaping is
+implemented. Strong profiles, occlusions, dim lighting, and skin-color mask
+limitations can cause missed detections, false detections or visible switching.
+No generative age/identity transformation is performed. Evaluate the look and
+performance on your webcam; it is not a claim of Instagram/Snapchat parity.
+
+The older centered-mask description above applies when no face model is used.
+Downloading the pinned, checksum-verified model is the only model setup;
+inference remains local. The model is not committed to this repository.
+Upstream model/library attribution is in `models/README.md` and
+`third-party/rustface-LICENSE.txt`. The crate's default Rayon feature is disabled
+to avoid creating an additional inference thread pool.
+
+Optional real-model regression check: provide a 640x436 RGB24 raw fixture
+containing a sufficiently large face (not committed here):
+
+```bash
+JOSCAM_TEST_MODEL=models/seeta_fd_frontal_v1.0.bin \
+JOSCAM_TEST_RGB=/absolute/path/face.rgb \
+cargo test --release --locked real_model_detects -- --ignored --nocapture
+```
+
+This checks detection followed by clearing the mask on blank input. Normal
+`cargo test --locked` does not require a model download or personal image.

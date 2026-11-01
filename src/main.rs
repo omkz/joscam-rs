@@ -1,4 +1,5 @@
 mod beauty;
+mod face;
 use std::{
     env,
     error::Error,
@@ -24,6 +25,9 @@ struct Config {
     strength: f32,
     light: f32,
     skin_brightening: f32,
+    rosy: f32,
+    glow: f32,
+    face_model: Option<String>,
     frames: Option<usize>,
     test: bool,
     mjpeg: bool,
@@ -40,17 +44,22 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         strength: 0.55,
         light: 0.25,
         skin_brightening: 0.0,
+        rosy: 0.0,
+        glow: 0.0,
+        face_model: None,
         frames: None,
         test: false,
         mjpeg: false,
         preview: false,
     };
+    let mut rosy_set = false;
+    let mut glow_set = false;
     let mut args = args;
     let mut preset = String::from("natural");
     let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--test-source" {
@@ -85,6 +94,15 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.skin_brightening = v.parse()?;
                 brightening_set = true;
             }
+            "--rosy" => {
+                c.rosy = v.parse()?;
+                rosy_set = true;
+            }
+            "--glow" => {
+                c.glow = v.parse()?;
+                glow_set = true;
+            }
+            "--face-model" => c.face_model = Some(v),
             "--preset" => preset = v,
             "--frames" => c.frames = Some(v.parse()?),
             _ => return Err(format!("Unknown option: {arg}").into()),
@@ -103,7 +121,27 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.skin_brightening = 0.45;
             }
         }
-        _ => return Err("Preset must be natural or youth".into()),
+        "kbeauty" => {
+            if !strength_set {
+                c.strength = 0.70;
+            }
+            if !light_set {
+                c.light = 0.35;
+            }
+            if !brightening_set {
+                c.skin_brightening = 0.35;
+            }
+            if !rosy_set {
+                c.rosy = 0.35;
+            }
+            if !glow_set {
+                c.glow = 0.40;
+            }
+            if c.face_model.is_none() {
+                c.face_model = Some("models/seeta_fd_frontal_v1.0.bin".into());
+            }
+        }
+        _ => return Err("Preset must be natural, youth, or kbeauty".into()),
     }
     if !(4..=1920).contains(&c.width)
         || !(4..=1080).contains(&c.height)
@@ -115,6 +153,10 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     if !(1..=60).contains(&c.fps)
         || !c.strength.is_finite()
         || !c.light.is_finite()
+        || !c.rosy.is_finite()
+        || !(0.0..=1.0).contains(&c.rosy)
+        || !c.glow.is_finite()
+        || !(0.0..=1.0).contains(&c.glow)
         || !c.skin_brightening.is_finite()
         || !(0.0..=1.0).contains(&c.skin_brightening)
         || !(0.0..=1.0).contains(&c.strength)
@@ -198,6 +240,13 @@ fn output_command(c: &Config) -> Command {
 }
 
 fn run(c: Config) -> Result<()> {
+    let mut tracker = match &c.face_model {
+        Some(path) => Some(
+            face::FaceTracker::new(path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+        ),
+        None => None,
+    };
     let size = format!("{}x{}", c.width, c.height);
     let fps = c.fps.to_string();
     let mut capture = Command::new("ffmpeg");
@@ -244,10 +293,16 @@ fn run(c: Config) -> Result<()> {
     let mut count = 0;
     let mut beauty = beauty::Beauty::default();
     beauty.skin_brightening = c.skin_brightening;
+    beauty.rosy = c.rosy;
+    beauty.glow = c.glow;
     let mut processing_ms = 0.0;
     let mut report_at = std::time::Instant::now();
     let mut report_frames = 0;
-    eprintln!("Starting {}x{} at requested {} FPS. Beauty is a centered skin-color heuristic; keep your face centered.",c.width,c.height,c.fps);
+    let mut face_visible = false;
+    if tracker.is_some() {
+        eprintln!("Local face-box detection enabled; no detected face means no beauty effect.");
+    }
+    eprintln!("Starting {}x{} at requested {} FPS. Beauty uses a skin-color mask; face-box tracking is active when a model is selected.",c.width,c.height,c.fps);
     loop {
         if let Some(status) = sink.0.try_wait()? {
             if c.preview && status.success() {
@@ -266,6 +321,11 @@ fn run(c: Config) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
         let started = std::time::Instant::now();
+        if let Some(tracker) = &mut tracker {
+            let rect = tracker.update(&src, c.width, c.height);
+            face_visible = rect.is_some();
+            beauty.set_tracked_face(rect);
+        }
         beauty.process(&src, &mut dst, c.width, c.height, c.strength, c.light);
         processing_ms += started.elapsed().as_secs_f64() * 1000.0;
         report_frames += 1;
@@ -286,9 +346,16 @@ fn run(c: Config) -> Result<()> {
         count += 1;
         if report_at.elapsed().as_secs_f64() >= 2.0 {
             eprintln!(
-                "Video {:.1} FPS | beauty {:.2} ms/frame",
+                "Video {:.1} FPS | beauty {:.2} ms/frame | face {}",
                 report_frames as f64 / report_at.elapsed().as_secs_f64(),
-                processing_ms / report_frames as f64
+                processing_ms / report_frames as f64,
+                if tracker.is_none() {
+                    "off"
+                } else if face_visible {
+                    "detected"
+                } else {
+                    "searching"
+                }
             );
             processing_ms = 0.0;
             report_frames = 0;
@@ -413,6 +480,30 @@ mod youth_tests {
             vec!["--skin-brightening", "-1"],
             vec!["--preset", "unknown"],
         ] {
+            assert!(parse(args.into_iter().map(String::from)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod kbeauty_tests {
+    use super::*;
+    #[test]
+    fn preset_enables_detector_and_explicit_controls_win() {
+        let c = parse(
+            ["--preset", "kbeauty", "--rosy", "0", "--glow", "0.2"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(c.face_model.is_some());
+        assert_eq!(c.rosy, 0.0);
+        assert_eq!(c.glow, 0.2);
+    }
+    #[test]
+    fn invalid_cosmetic_parameters_are_rejected() {
+        for args in [["--rosy", "NaN"], ["--glow", "-1"], ["--rosy", "1.1"]] {
             assert!(parse(args.into_iter().map(String::from)).is_err());
         }
     }

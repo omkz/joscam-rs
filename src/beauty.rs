@@ -1,9 +1,14 @@
-/// Local cosmetic retouching. The mask is a centered portrait/color heuristic,
-/// not face tracking. Scratch storage and the spatial mask are reused.
+/// Local cosmetic retouching. The skin-color mask is either centered or
+/// restricted to a detected face box. Scratch storage is reused.
 #[derive(Default)]
 pub struct Beauty {
     /// Cosmetic lift toward white inside the existing skin mask, 0..1.
     pub skin_brightening: f32,
+    pub rosy: f32,
+    pub glow: f32,
+    tracking: bool,
+    face: Option<crate::face::FaceRect>,
+    spatial_dirty: bool,
     shape: (usize, usize),
     horizontal: Vec<f32>,
     blurred: Vec<f32>,
@@ -12,20 +17,53 @@ pub struct Beauty {
 }
 
 impl Beauty {
+    pub fn set_tracked_face(&mut self, face: Option<crate::face::FaceRect>) {
+        if !self.tracking || self.face != face {
+            self.spatial_dirty = true;
+        }
+        self.tracking = true;
+        self.face = face;
+    }
+
     fn prepare(&mut self, width: usize, height: usize) {
-        if self.shape == (width, height) {
+        if self.shape == (width, height) && !self.spatial_dirty {
             return;
         }
         self.shape = (width, height);
+        self.spatial_dirty = false;
         self.horizontal.resize(width * height * 3, 0.0);
         self.blurred.resize(width * height * 3, 0.0);
         self.column_sums.resize(width * 3, 0.0);
         self.spatial.resize(width * height, 0.0);
         for y in 0..height {
             for x in 0..width {
-                let nx = (x as f32 / width as f32 - 0.5) / 0.24;
-                let ny = (y as f32 / height as f32 - 0.46) / 0.43;
-                self.spatial[y * width + x] = ((1.0 - nx * nx - ny * ny) * 5.0).clamp(0.0, 1.0);
+                let px = x as f32 / width as f32;
+                let py = y as f32 / height as f32;
+                let (nx, ny) = if self.tracking {
+                    let Some(f) = self.face else {
+                        self.spatial[y * width + x] = 0.0;
+                        continue;
+                    };
+                    (
+                        (px - f.x - f.w * 0.5) / (f.w * 0.46).max(0.001),
+                        (py - f.y - f.h * 0.52) / (f.h * 0.50).max(0.001),
+                    )
+                } else {
+                    ((px - 0.5) / 0.24, (py - 0.46) / 0.43)
+                };
+                let mut mask = ((1.0 - nx * nx - ny * ny) * 5.0).clamp(0.0, 1.0);
+                if self.tracking {
+                    // Broad box-relative feature protection; these are NOT landmarks.
+                    for (cx, cy, rx, ry) in [
+                        (-0.42, -0.27, 0.46, 0.25),
+                        (0.42, -0.27, 0.46, 0.25),
+                        (0.0, 0.51, 0.55, 0.22),
+                    ] {
+                        let d = ((nx - cx) / rx).powi(2) + ((ny - cy) / ry).powi(2);
+                        mask *= ((d - 0.7) * 3.0).clamp(0.0, 1.0);
+                    }
+                }
+                self.spatial[y * width + x] = mask;
             }
         }
     }
@@ -74,10 +112,18 @@ impl Beauty {
         let amount = amount.clamp(0.0, 1.0);
         let light = light.clamp(0.0, 1.0);
         let brightening = self.skin_brightening.clamp(0.0, 1.0);
-        if width == 0 || height == 0 || (amount == 0.0 && light == 0.0 && brightening == 0.0) {
+        let rosy = self.rosy.clamp(0.0, 1.0);
+        let glow = self.glow.clamp(0.0, 1.0);
+        if width == 0
+            || height == 0
+            || (amount == 0.0 && light == 0.0 && brightening == 0.0 && rosy == 0.0 && glow == 0.0)
+        {
             return;
         }
         self.prepare(width, height);
+        if self.tracking && self.face.is_none() {
+            return;
+        }
         if amount > 0.0 {
             self.blur(src, width, height);
         }
@@ -122,6 +168,9 @@ impl Beauty {
                     // A bounded blend toward white lifts and gently desaturates
                     // skin, preserving channel ordering and highlight headroom.
                     let target = target + (255.0 - target) * brightening * 0.35;
+                    let target = target + glow * 0.12 * target * (1.0 - target / 255.0);
+                    let tint = [1.0, 0.10, 0.40][c];
+                    let target = target + (255.0 - target) * rosy * 0.08 * tint;
                     dst[i + c] = (original + (target - original) * mask)
                         .clamp(0.0, 255.0)
                         .round() as u8;
@@ -261,5 +310,53 @@ mod brightening_tests {
             filter.process(&src, &mut dst, 64, 48, 0.0, 0.0);
             assert_eq!(src, dst);
         }
+    }
+}
+
+#[cfg(test)]
+mod tracking_tests {
+    use super::*;
+    use crate::face::FaceRect;
+    #[test]
+    fn tracking_without_face_is_exact_passthrough() {
+        let src = [170, 120, 100].repeat(80 * 60);
+        let mut dst = src.clone();
+        let mut b = Beauty::default();
+        b.skin_brightening = 0.5;
+        b.rosy = 0.5;
+        b.glow = 0.5;
+        b.set_tracked_face(None);
+        b.process(&src, &mut dst, 80, 60, 0.7, 0.4);
+        assert_eq!(src, dst);
+    }
+    #[test]
+    fn tracked_mask_follows_face_and_clears_on_loss() {
+        let src = [170, 120, 100].repeat(80 * 60);
+        let mut dst = src.clone();
+        let mut b = Beauty::default();
+        b.skin_brightening = 0.5;
+        b.set_tracked_face(Some(FaceRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.3,
+            h: 0.7,
+        }));
+        b.process(&src, &mut dst, 80, 60, 0.0, 0.0);
+        let left = (30 * 80 + 20) * 3;
+        let right = (30 * 80 + 60) * 3;
+        assert!(dst[left] > src[left]);
+        assert_eq!(dst[right], src[right]);
+        b.set_tracked_face(Some(FaceRect {
+            x: 0.6,
+            y: 0.1,
+            w: 0.3,
+            h: 0.7,
+        }));
+        b.process(&src, &mut dst, 80, 60, 0.0, 0.0);
+        assert_eq!(dst[left], src[left]);
+        assert!(dst[right] > src[right]);
+        b.set_tracked_face(None);
+        b.process(&src, &mut dst, 80, 60, 0.0, 0.0);
+        assert_eq!(src, dst);
     }
 }
