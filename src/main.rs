@@ -2,6 +2,7 @@ mod beauty;
 mod face;
 mod features;
 mod landmarks;
+mod particles;
 use std::{
     env,
     error::Error,
@@ -38,6 +39,7 @@ struct Config {
     mjpeg: bool,
     preview: bool,
     compare: bool,
+    particles: particles::Settings,
 }
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let mut c = Config {
@@ -61,6 +63,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         mjpeg: false,
         preview: false,
         compare: false,
+        particles: particles::Settings::default(),
     };
     let (mut lip_set, mut eye_set) = (false, false);
     let mut rosy_set = false;
@@ -70,7 +73,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--test-source" {
@@ -127,11 +130,16 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.eye_brightening = v.parse()?;
                 eye_set = true;
             }
+            "--particles" => c.particles.mode = particles::Mode::parse(&v)?,
+            "--particle-count" => c.particles.count = v.parse()?,
+            "--particle-size" => c.particles.size = v.parse()?,
+            "--particle-speed" => c.particles.speed = v.parse()?,
             "--preset" => preset = v,
             "--frames" => c.frames = Some(v.parse()?),
             _ => return Err(format!("Unknown option: {arg}").into()),
         }
     }
+    c.particles.validate()?;
     match preset.as_str() {
         "natural" => {}
         "youth" => {
@@ -361,6 +369,7 @@ fn run(c: Config) -> Result<()> {
     let mut report_at = std::time::Instant::now();
     let mut report_frames = 0;
     let mut face_visible = false;
+    let particle_clock = std::time::Instant::now();
     if tracker.is_some() {
         eprintln!("Local face-box detection enabled; no detected face means no beauty effect.");
     }
@@ -383,13 +392,23 @@ fn run(c: Config) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
         let started = std::time::Instant::now();
+        let mut current_face = None;
         if let Some(tracker) = &mut tracker {
             let rect = tracker.update(&src, c.width, c.height);
             face_visible = rect.is_some();
+            current_face = rect;
             beauty.set_tracked_face(rect);
             beauty.set_landmarks(tracker.landmarks().cloned());
         }
         beauty.process(&src, &mut dst, c.width, c.height, c.strength, c.light);
+        particles::render(
+            &mut dst,
+            c.width,
+            c.height,
+            particle_clock.elapsed().as_secs_f64(),
+            c.particles,
+            current_face,
+        );
         processing_ms += started.elapsed().as_secs_f64() * 1000.0;
         report_frames += 1;
         if c.compare {
@@ -412,7 +431,7 @@ fn run(c: Config) -> Result<()> {
         count += 1;
         if report_at.elapsed().as_secs_f64() >= 2.0 {
             eprintln!(
-                "Video {:.1} FPS | beauty {:.2} ms/frame | face {} | landmarks {}",
+                "Video {:.1} FPS | effects {:.2} ms/frame | face {} | landmarks {}",
                 report_frames as f64 / report_at.elapsed().as_secs_f64(),
                 processing_ms / report_frames as f64,
                 if tracker.is_none() {
@@ -593,5 +612,41 @@ mod comparison_tests {
             assert_eq!(&row[12..], &[200; 12]);
         }
         assert!(parse(["--compare"].into_iter().map(String::from)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod particle_cli_tests {
+    use super::*;
+    #[test]
+    fn particle_options_are_parsed_and_invalid_values_rejected() {
+        let c = parse(
+            [
+                "--particles",
+                "both",
+                "--particle-count",
+                "60",
+                "--particle-size",
+                "1.5",
+                "--particle-speed",
+                "0",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c.particles.mode, particles::Mode::Both);
+        assert_eq!(c.particles.count, 60);
+        assert_eq!(c.particles.size, 1.5);
+        assert_eq!(c.particles.speed, 0.0);
+        for args in [
+            ["--particles", "unknown"],
+            ["--particle-count", "201"],
+            ["--particle-size", "NaN"],
+            ["--particle-speed", "4"],
+        ] {
+            assert!(parse(args.into_iter().map(String::from)).is_err());
+        }
     }
 }

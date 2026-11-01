@@ -283,3 +283,35 @@ These checks require runtime setup. The ordinary test suite requires neither
 model downloads nor a camera. Missing runtime/model errors occur before opening
 the webcam. Strong brightening can still create a visible face/neck difference;
 use comparison mode and reduce `--skin-brightening` when desired.
+
+## Sparkle and sakura overlays
+
+```bash
+cargo run --release --locked -- --preview --particles both
+cargo run --release --locked -- --preview --preset kbeauty --particles sakura \
+  --particle-count 60 --particle-size 1.2 --particle-speed 0.8
+```
+
+`--particles` accepts `off` (default), `sparkle`, `sakura`, or `both`. Particle
+count is the total number of candidates, shared between styles in `both` mode:
+
+| Control | Default | Range |
+| --- | --- | --- |
+| `--particle-count` | 40 | 0–200 |
+| `--particle-size` | 1.0 | 0.25–3.0 |
+| `--particle-speed` | 1.0 | 0–3.0; 0 freezes animation |
+
+These are procedural screen overlays with no image assets or cloud services.
+They are not background segmentation: particles may appear over your clothing
+or other foreground objects. With face tracking enabled, particles intersecting
+the detected face box are skipped, including a small safety margin. This is
+best-effort face avoidance; without a detection they can appear anywhere.
+Skipped particles are not replaced, so the visible count may be lower.
+
+Animation follows elapsed time, not frame count. Sprites are clipped to the
+frame, and the renderer reuses the output buffer without allocating per frame.
+Large counts/sizes cost more CPU; start with 40–60 particles. Rendering occurs
+after beauty and before the comparison split, so `--compare` keeps the original
+left half free of particles. For Chrome, remove `--preview` (and `--compare`);
+the same overlay is sent to the virtual camera. Particles alone do not require
+neural models or ONNX Runtime. Beauty presets retain their usual model setup.
