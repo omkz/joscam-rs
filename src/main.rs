@@ -26,6 +26,7 @@ struct Config {
     frames: Option<usize>,
     test: bool,
     mjpeg: bool,
+    preview: bool,
 }
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let mut c = Config {
@@ -40,15 +41,20 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         frames: None,
         test: false,
         mjpeg: false,
+        preview: false,
     };
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--test-source" {
             c.test = true;
+            continue;
+        }
+        if arg == "--preview" {
+            c.preview = true;
             continue;
         }
         if arg == "--mjpeg" {
@@ -85,11 +91,80 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     {
         return Err("Invalid fps, strength, light, or frame limit".into());
     }
-    if c.record.is_none() && c.input == c.output {
+    if c.preview && c.record.is_some() {
+        return Err("--preview and --record cannot be combined".into());
+    }
+    if !c.preview && c.record.is_none() && c.input == c.output {
         return Err("Input and virtual output must differ".into());
     }
     Ok(Some(c))
 }
+// Preview consumes the processed RGB stream directly, without opening a
+// loopback output. The same beauty pipeline is used in either mode.
+fn output_command(c: &Config) -> Command {
+    let size = format!("{}x{}", c.width, c.height);
+    let fps = c.fps.to_string();
+    if c.preview {
+        let mut command = Command::new("ffplay");
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-autoexit",
+            "-window_title",
+            "Joscam Rust - Beauty Preview (Q / Esc to close)",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgb24",
+            "-video_size",
+            &size,
+            "-framerate",
+            &fps,
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-sync",
+            "video",
+            "-framedrop",
+            "-i",
+            "pipe:0",
+        ]);
+        return command;
+    }
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-nostdin",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "rgb24",
+        "-video_size",
+        &size,
+        "-framerate",
+        &fps,
+        "-i",
+        "pipe:0",
+        "-an",
+        "-threads",
+        "1",
+    ]);
+    if let Some(path) = &c.record {
+        command.args([
+            "-n", "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p", path,
+        ]);
+    } else {
+        command.args([
+            "-c:v", "rawvideo", "-pix_fmt", "yuyv422", "-f", "v4l2", &c.output,
+        ]);
+    }
+    command
+}
+
 fn run(c: Config) -> Result<()> {
     let size = format!("{}x{}", c.width, c.height);
     let fps = c.fps.to_string();
@@ -129,35 +204,7 @@ fn run(c: Config) -> Result<()> {
             .spawn()?,
     );
     let mut source = capture.0.stdout.take().ok_or("No capture pipe")?;
-    let mut sink = Command::new("ffmpeg");
-    sink.args([
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-nostdin",
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        "rgb24",
-        "-video_size",
-        &size,
-        "-framerate",
-        &fps,
-        "-i",
-        "pipe:0",
-        "-an",
-        "-threads",
-        "1",
-    ]);
-    if let Some(path) = &c.record {
-        sink.args([
-            "-n", "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p", path,
-        ]);
-    } else {
-        sink.args([
-            "-c:v", "rawvideo", "-pix_fmt", "yuyv422", "-f", "v4l2", &c.output,
-        ]);
-    }
+    let mut sink = output_command(&c);
     let mut sink = Managed(sink.stdin(Stdio::piped()).spawn()?);
     let mut target = sink.0.stdin.take().ok_or("No output pipe")?;
     let mut src = vec![0; c.width * c.height * 3];
@@ -169,6 +216,13 @@ fn run(c: Config) -> Result<()> {
     let mut report_frames = 0;
     eprintln!("Starting {}x{} at requested {} FPS. Beauty is a centered skin-color heuristic; keep your face centered.",c.width,c.height,c.fps);
     loop {
+        if let Some(status) = sink.0.try_wait()? {
+            if c.preview && status.success() {
+                eprintln!("Preview closed.");
+                return Ok(());
+            }
+            return Err(format!("Output exited: {status}").into());
+        }
         match source.read_exact(&mut src) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -182,7 +236,20 @@ fn run(c: Config) -> Result<()> {
         beauty.process(&src, &mut dst, c.width, c.height, c.strength, c.light);
         processing_ms += started.elapsed().as_secs_f64() * 1000.0;
         report_frames += 1;
-        target.write_all(&dst)?;
+        if let Err(error) = target.write_all(&dst) {
+            if c.preview && error.kind() == io::ErrorKind::BrokenPipe {
+                drop(target);
+                let status = sink.0.wait()?;
+                if status.success() {
+                    eprintln!("Preview closed.");
+                    return Ok(());
+                }
+                return Err(
+                    format!("Preview exited: {status}; check FFplay/display errors above").into(),
+                );
+            }
+            return Err(error.into());
+        }
         count += 1;
         if report_at.elapsed().as_secs_f64() >= 2.0 {
             eprintln!(
@@ -231,5 +298,42 @@ mod tests {
         ] {
             assert!(parse(args.into_iter().map(String::from)).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    fn config(args: &[&str]) -> Config {
+        parse(args.iter().map(|s| s.to_string())).unwrap().unwrap()
+    }
+    #[test]
+    fn preview_is_standalone_and_uses_processed_rgb() {
+        let c = config(&["--preview", "--input", "/dev/video2"]);
+        assert!(c.preview);
+        let command = output_command(&c);
+        assert_eq!(command.get_program(), "ffplay");
+        let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert!(args.contains(&"rgb24"));
+        assert!(args.contains(&"pipe:0"));
+        assert!(!args.contains(&"v4l2"));
+        assert!(!args.contains(&"/dev/video2"));
+    }
+    #[test]
+    fn preview_and_record_are_mutually_exclusive() {
+        assert!(parse(
+            ["--preview", "--record", "a.mp4"]
+                .into_iter()
+                .map(String::from)
+        )
+        .is_err());
+    }
+    #[test]
+    fn virtual_output_is_still_default() {
+        let c = config(&[]);
+        assert!(!c.preview);
+        let command = output_command(&c);
+        assert_eq!(command.get_program(), "ffmpeg");
+        assert!(command.get_args().any(|s| s == "/dev/video2"));
     }
 }
