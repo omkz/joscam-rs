@@ -130,3 +130,24 @@ Preview without physical hardware:
 ```bash
 cargo run --release -- --preview --test-source --frames 90
 ```
+
+## Brighter skin / Youth preset
+
+```bash
+cargo run --release -- --preview --preset youth
+cargo run --release -- --preview --preset youth --skin-brightening 0.65
+```
+
+`--skin-brightening` ranges from 0 (off, default) to 1 (strongest). It blends
+skin candidates toward white inside the existing portrait mask, gently reducing
+saturation as it brightens. It does not brighten the whole frame. Skin-colored
+background objects within the mask may still be affected.
+
+`--preset youth` sets smoothing to 0.75, face light to 0.45 and skin brightening
+to 0.45. Explicit `--strength`, `--light`, and `--skin-brightening` values override
+the preset regardless of argument order. The default `natural` preset preserves
+previous defaults. Set all three controls to zero for exact passthrough.
+
+Youth is cosmetic smoothing/lighting, not age reconstruction or wrinkle-specific
+removal. There is still no face detection, landmark tracking or skin segmentation.
+For Chrome, omit `--preview` and use your usual virtual output device.

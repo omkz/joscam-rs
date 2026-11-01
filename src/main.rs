@@ -23,6 +23,7 @@ struct Config {
     fps: u32,
     strength: f32,
     light: f32,
+    skin_brightening: f32,
     frames: Option<usize>,
     test: bool,
     mjpeg: bool,
@@ -38,15 +39,18 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         fps: 30,
         strength: 0.55,
         light: 0.25,
+        skin_brightening: 0.0,
         frames: None,
         test: false,
         mjpeg: false,
         preview: false,
     };
     let mut args = args;
+    let mut preset = String::from("natural");
+    let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--test-source" {
@@ -69,11 +73,37 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
             "--width" => c.width = v.parse()?,
             "--height" => c.height = v.parse()?,
             "--fps" => c.fps = v.parse()?,
-            "--strength" => c.strength = v.parse()?,
-            "--light" => c.light = v.parse()?,
+            "--strength" => {
+                c.strength = v.parse()?;
+                strength_set = true;
+            }
+            "--light" => {
+                c.light = v.parse()?;
+                light_set = true;
+            }
+            "--skin-brightening" => {
+                c.skin_brightening = v.parse()?;
+                brightening_set = true;
+            }
+            "--preset" => preset = v,
             "--frames" => c.frames = Some(v.parse()?),
             _ => return Err(format!("Unknown option: {arg}").into()),
         }
+    }
+    match preset.as_str() {
+        "natural" => {}
+        "youth" => {
+            if !strength_set {
+                c.strength = 0.75;
+            }
+            if !light_set {
+                c.light = 0.45;
+            }
+            if !brightening_set {
+                c.skin_brightening = 0.45;
+            }
+        }
+        _ => return Err("Preset must be natural or youth".into()),
     }
     if !(4..=1920).contains(&c.width)
         || !(4..=1080).contains(&c.height)
@@ -85,6 +115,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     if !(1..=60).contains(&c.fps)
         || !c.strength.is_finite()
         || !c.light.is_finite()
+        || !c.skin_brightening.is_finite()
+        || !(0.0..=1.0).contains(&c.skin_brightening)
         || !(0.0..=1.0).contains(&c.strength)
         || !(0.0..=1.0).contains(&c.light)
         || c.frames == Some(0)
@@ -211,6 +243,7 @@ fn run(c: Config) -> Result<()> {
     let mut dst = src.clone();
     let mut count = 0;
     let mut beauty = beauty::Beauty::default();
+    beauty.skin_brightening = c.skin_brightening;
     let mut processing_ms = 0.0;
     let mut report_at = std::time::Instant::now();
     let mut report_frames = 0;
@@ -335,5 +368,52 @@ mod preview_tests {
         let command = output_command(&c);
         assert_eq!(command.get_program(), "ffmpeg");
         assert!(command.get_args().any(|s| s == "/dev/video2"));
+    }
+}
+
+#[cfg(test)]
+mod youth_tests {
+    use super::*;
+    #[test]
+    fn youth_defaults_and_explicit_overrides_work_in_either_order() {
+        let c = parse(["--preset", "youth"].into_iter().map(String::from))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (c.strength, c.light, c.skin_brightening),
+            (0.75, 0.45, 0.45)
+        );
+        for args in [
+            vec![
+                "--preset",
+                "youth",
+                "--skin-brightening",
+                "0",
+                "--strength",
+                "0",
+            ],
+            vec![
+                "--strength",
+                "0",
+                "--skin-brightening",
+                "0",
+                "--preset",
+                "youth",
+            ],
+        ] {
+            let c = parse(args.into_iter().map(String::from)).unwrap().unwrap();
+            assert_eq!((c.strength, c.skin_brightening), (0.0, 0.0));
+        }
+    }
+    #[test]
+    fn invalid_brightening_and_preset_are_rejected() {
+        for args in [
+            vec!["--skin-brightening", "NaN"],
+            vec!["--skin-brightening", "1.1"],
+            vec!["--skin-brightening", "-1"],
+            vec!["--preset", "unknown"],
+        ] {
+            assert!(parse(args.into_iter().map(String::from)).is_err());
+        }
     }
 }
