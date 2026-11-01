@@ -163,6 +163,10 @@ fn run(c: Config) -> Result<()> {
     let mut src = vec![0; c.width * c.height * 3];
     let mut dst = src.clone();
     let mut count = 0;
+    let mut beauty = beauty::Beauty::default();
+    let mut processing_ms = 0.0;
+    let mut report_at = std::time::Instant::now();
+    let mut report_frames = 0;
     eprintln!("Starting {}x{} at requested {} FPS. Beauty is a centered skin-color heuristic; keep your face centered.",c.width,c.height,c.fps);
     loop {
         match source.read_exact(&mut src) {
@@ -174,9 +178,22 @@ fn run(c: Config) -> Result<()> {
             }
             Err(e) => return Err(e.into()),
         }
-        beauty::process(&src, &mut dst, c.width, c.height, c.strength, c.light);
+        let started = std::time::Instant::now();
+        beauty.process(&src, &mut dst, c.width, c.height, c.strength, c.light);
+        processing_ms += started.elapsed().as_secs_f64() * 1000.0;
+        report_frames += 1;
         target.write_all(&dst)?;
         count += 1;
+        if report_at.elapsed().as_secs_f64() >= 2.0 {
+            eprintln!(
+                "Video {:.1} FPS | beauty {:.2} ms/frame",
+                report_frames as f64 / report_at.elapsed().as_secs_f64(),
+                processing_ms / report_frames as f64
+            );
+            processing_ms = 0.0;
+            report_frames = 0;
+            report_at = std::time::Instant::now();
+        }
         if c.frames.is_some_and(|n| count >= n) {
             break;
         }

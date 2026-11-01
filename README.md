@@ -86,3 +86,25 @@ This app never runs sudo or changes your system configuration automatically.
 Rust source: MIT (see LICENSE). FFmpeg and v4l2loopback are separately installed
 third-party programs with their own licenses. Reassess distribution obligations
 before bundling dependencies into a commercial installer.
+
+## Beauty performance
+
+Beauty uses a reusable two-pass running-sum blur and an edge/detail guard,
+replacing the per-pixel 25-neighbor bilateral approximation. The visual result
+is not identical to the original filter. The centered skin-color mask and its
+limitations still apply. Face Light alone skips smoothing entirely.
+
+Every two seconds the terminal reports delivered pipeline FPS and mean beauty
+processing milliseconds per frame. This measures the local pipeline, not
+Chrome rendering or end-to-end latency. At 30 FPS the whole pipeline needs to
+fit within about 33 ms/frame; leave room for capture, conversion, and Chrome.
+
+Run the synthetic processing benchmark (not a camera or visual-quality test):
+
+```bash
+cargo test --release benchmark_beauty -- --ignored --nocapture
+```
+
+Compare enabled beauty against `--strength 0 --light 0` on the same camera.
+Use `--release` for real-time use. Webcam quality and actual FPS must still be
+verified on your machine.
