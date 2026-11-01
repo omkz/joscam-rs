@@ -151,3 +151,135 @@ previous defaults. Set all three controls to zero for exact passthrough.
 Youth is cosmetic smoothing/lighting, not age reconstruction or wrinkle-specific
 removal. There is still no face detection, landmark tracking or skin segmentation.
 For Chrome, omit `--preview` and use your usual virtual output device.
+
+## K-Beauty with local face detection
+
+One-time setup (requires Git and sha256sum):
+
+```bash
+bash scripts/download-face-model.sh
+cargo run --release -- --preview --preset kbeauty
+```
+
+K-Beauty adds soft skin brightening, a subtle rosy tint, and a gentle glow.
+It loads the local SeetaFace model through the Rust `rustface` library. The
+small grayscale detection input is processed on a background thread at up to
+10 detection requests/second. Only the largest detected face is followed.
+The video pipeline never waits for inference; queued work is bounded and
+old results expire after 350 ms. This can create a short delay when moving
+quickly. No detected face means **no cosmetic effects** in tracking mode.
+Terminal status reads `face detected` or `face searching`.
+
+```bash
+cargo run --release -- --preview --preset kbeauty --rosy 0.25 --glow 0.5 --skin-brightening 0.45
+```
+
+`--rosy` and `--glow` each range from 0 to 1 and default to 0 outside the
+K-Beauty preset. Explicit values override preset defaults in either order.
+K-Beauty defaults: strength 0.70, face light 0.35, skin brightening 0.35,
+rosy 0.35, glow 0.40. Use `--face-model PATH` to enable tracking with another
+preset; default K-Beauty path is `models/seeta_fd_frontal_v1.0.bin` relative
+to the working directory. Run from the project root or supply an absolute path.
+Omit `--preview` for virtual output to Chrome as before.
+
+This is **face-box detection with position smoothing, not facial landmarks**.
+Eye/mouth protection uses approximate box-relative regions; it is not precise
+makeup placement. No lip tint, blush, eye enlargement or jaw reshaping is
+implemented. Strong profiles, occlusions, dim lighting, and skin-color mask
+limitations can cause missed detections, false detections or visible switching.
+No generative age/identity transformation is performed. Evaluate the look and
+performance on your webcam; it is not a claim of Instagram/Snapchat parity.
+
+The older centered-mask description above applies when no face model is used.
+Downloading the pinned, checksum-verified model is the only model setup;
+inference remains local. The model is not committed to this repository.
+Upstream model/library attribution is in `models/README.md` and
+`third-party/rustface-LICENSE.txt`. The crate's default Rayon feature is disabled
+to avoid creating an additional inference thread pool.
+
+Optional real-model regression check: provide a 640x436 RGB24 raw fixture
+containing a sufficiently large face (not committed here):
+
+```bash
+JOSCAM_TEST_MODEL=models/seeta_fd_frontal_v1.0.bin \
+JOSCAM_TEST_RGB=/absolute/path/face.rgb \
+cargo test --release --locked real_model_detects -- --ignored --nocapture
+```
+
+This checks detection followed by clearing the mask on blank input. Normal
+`cargo test --locked` does not require a model download or personal image.
+
+## Dense landmarks, lip tint, and brighter eyes (PR #4 update)
+
+The latest K-Beauty path now uses 468 facial landmarks in addition to face-box
+detection. Download the extra, checksum-verified ONNX model once:
+
+```bash
+bash scripts/setup-beauty.sh
+cargo run --release --locked -- --preview --preset kbeauty --compare
+```
+
+The left half of the comparison shows the original frame and the right half
+shows the processed frame. Remove `--compare` for a normal preview; comparison
+is only allowed with `--preview`.
+
+The updated path uses the face contour for skin coverage, protects actual eye
+and lip contours from smoothing, and excludes the inner mouth from lip tint.
+Eyebrows are excluded as well. Skin brightening and face light are stronger, and the smoothing detail guard
+allows more texture reduction. The skin-color gate is broader inside a validated
+face mesh, so neutral skin is not silently dropped. This is still cosmetic
+retouching, not age reconstruction or skin-condition diagnosis.
+
+```bash
+cargo run --release --locked -- --preview --preset kbeauty \
+  --skin-brightening 0.65 --strength 0.85 \
+  --lip-tint 0.5 --eye-brightening 0.5
+```
+
+`--lip-tint` blends a luminance-adjusted rose tint inside the outer lip contour,
+excluding the mouth cavity. `--eye-brightening` selectively lifts bright,
+low-saturation pixels inside the eye contours; dark pupils are preserved. It
+does not enlarge eyes, change iris color, or reshape the face. Each control is
+0..1 and can be disabled with 0. K-Beauty defaults now use smoothing 0.80,
+skin brightening 0.50, lip tint 0.35 and eye brightening 0.40; face light/rosy/glow
+remain 0.35/0.35/0.40. Explicit control values override preset defaults.
+
+Terminal output distinguishes `face detected` from `landmarks ready`. Lip and
+eye effects require valid landmarks and never fall back to guessed positions.
+If a face box exists but the mesh is invalid, skin retouch uses the box mask
+while feature effects stop. No face means no effects. Contours are refreshed
+on the background inference path, so rapid movement, blinking, open-mouth
+motion, strong head tilt and occlusion still require visual testing. The model
+crop currently has no eye-line roll correction.
+
+Rust calls ONNX Runtime 1.19.2 locally through pinned `ort` bindings. The setup
+script downloads both neural models and the CPU runtime, checks their SHA-256
+digests, and preserves the runtime's license. Automatic runtime installation
+currently supports Linux x86_64. No Python or cloud inference is involved.
+Runtime files live in `models/onnxruntime/`; set `ORT_DYLIB_PATH` to a compatible
+ONNX Runtime API 19 library if using a custom installation. Run from the project
+root unless supplying absolute model/runtime paths.
+
+The first Rust compilation adds dependencies. Run release builds for video and
+use the committed lockfile (`--locked`). Cargo.lock remains format 3; selected
+bindings/dependencies avoid requiring a very recent toolchain. Validation uses
+Rust 1.85.1 and 1.99.1; a Rust 1.75 build has not been verified.
+
+The earlier box-only limits above describe the fallback path. The ONNX export
+comes from Yakhyokhuja Valikhujaev's Apache-2.0 MediaPipe Face Mesh port; source,
+weight digest, and notices are in `models/README.md` and `third-party/`.
+Model bytes are not committed and camera frames are never uploaded.
+
+To run both real-model regression checks with a local 640x436 RGB24 face fixture:
+
+```bash
+JOSCAM_TEST_MESH=models/face_mesh_Nx3x192x192.onnx \
+JOSCAM_TEST_MODEL=models/seeta_fd_frontal_v1.0.bin \
+JOSCAM_TEST_RGB=/absolute/path/face.rgb \
+cargo test --release --locked real_ -- --ignored --nocapture
+```
+
+These checks require runtime setup. The ordinary test suite requires neither
+model downloads nor a camera. Missing runtime/model errors occur before opening
+the webcam. Strong brightening can still create a visible face/neck difference;
+use comparison mode and reduce `--skin-brightening` when desired.

@@ -1,2 +1,10 @@
 /target/
 *.mp4
+
+/models/*.bin
+
+/models/*.onnx
+/models/.face-mesh.*
+
+/models/onnxruntime/
+/models/.ort.*/

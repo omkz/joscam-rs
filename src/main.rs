@@ -1,4 +1,7 @@
 mod beauty;
+mod face;
+mod features;
+mod landmarks;
 use std::{
     env,
     error::Error,
@@ -24,10 +27,17 @@ struct Config {
     strength: f32,
     light: f32,
     skin_brightening: f32,
+    rosy: f32,
+    glow: f32,
+    face_model: Option<String>,
+    landmark_model: Option<String>,
+    lip_tint: f32,
+    eye_brightening: f32,
     frames: Option<usize>,
     test: bool,
     mjpeg: bool,
     preview: bool,
+    compare: bool,
 }
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let mut c = Config {
@@ -40,21 +50,35 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         strength: 0.55,
         light: 0.25,
         skin_brightening: 0.0,
+        rosy: 0.0,
+        glow: 0.0,
+        face_model: None,
+        landmark_model: None,
+        lip_tint: 0.0,
+        eye_brightening: 0.0,
         frames: None,
         test: false,
         mjpeg: false,
         preview: false,
+        compare: false,
     };
+    let (mut lip_set, mut eye_set) = (false, false);
+    let mut rosy_set = false;
+    let mut glow_set = false;
     let mut args = args;
     let mut preset = String::from("natural");
     let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--test-source" {
             c.test = true;
+            continue;
+        }
+        if arg == "--compare" {
+            c.compare = true;
             continue;
         }
         if arg == "--preview" {
@@ -85,6 +109,24 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.skin_brightening = v.parse()?;
                 brightening_set = true;
             }
+            "--rosy" => {
+                c.rosy = v.parse()?;
+                rosy_set = true;
+            }
+            "--glow" => {
+                c.glow = v.parse()?;
+                glow_set = true;
+            }
+            "--face-model" => c.face_model = Some(v),
+            "--landmark-model" => c.landmark_model = Some(v),
+            "--lip-tint" => {
+                c.lip_tint = v.parse()?;
+                lip_set = true;
+            }
+            "--eye-brightening" => {
+                c.eye_brightening = v.parse()?;
+                eye_set = true;
+            }
             "--preset" => preset = v,
             "--frames" => c.frames = Some(v.parse()?),
             _ => return Err(format!("Unknown option: {arg}").into()),
@@ -103,7 +145,42 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.skin_brightening = 0.45;
             }
         }
-        _ => return Err("Preset must be natural or youth".into()),
+        "kbeauty" => {
+            if c.landmark_model.is_none() {
+                c.landmark_model = Some("models/face_mesh_Nx3x192x192.onnx".into());
+            }
+            if !lip_set {
+                c.lip_tint = 0.35;
+            }
+            if !eye_set {
+                c.eye_brightening = 0.40;
+            }
+            if !strength_set {
+                c.strength = 0.80;
+            }
+            if !light_set {
+                c.light = 0.35;
+            }
+            if !brightening_set {
+                c.skin_brightening = 0.50;
+            }
+            if !rosy_set {
+                c.rosy = 0.35;
+            }
+            if !glow_set {
+                c.glow = 0.40;
+            }
+            if c.face_model.is_none() {
+                c.face_model = Some("models/seeta_fd_frontal_v1.0.bin".into());
+            }
+        }
+        _ => return Err("Preset must be natural, youth, or kbeauty".into()),
+    }
+    if c.landmark_model.is_some() && c.face_model.is_none() {
+        c.face_model = Some("models/seeta_fd_frontal_v1.0.bin".into());
+    }
+    if (c.lip_tint > 0.0 || c.eye_brightening > 0.0) && c.landmark_model.is_none() {
+        return Err("Lip and eye effects require --landmark-model (or --preset kbeauty)".into());
     }
     if !(4..=1920).contains(&c.width)
         || !(4..=1080).contains(&c.height)
@@ -115,6 +192,14 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     if !(1..=60).contains(&c.fps)
         || !c.strength.is_finite()
         || !c.light.is_finite()
+        || !c.rosy.is_finite()
+        || !(0.0..=1.0).contains(&c.rosy)
+        || !c.lip_tint.is_finite()
+        || !(0.0..=1.0).contains(&c.lip_tint)
+        || !c.eye_brightening.is_finite()
+        || !(0.0..=1.0).contains(&c.eye_brightening)
+        || !c.glow.is_finite()
+        || !(0.0..=1.0).contains(&c.glow)
         || !c.skin_brightening.is_finite()
         || !(0.0..=1.0).contains(&c.skin_brightening)
         || !(0.0..=1.0).contains(&c.strength)
@@ -122,6 +207,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         || c.frames == Some(0)
     {
         return Err("Invalid fps, strength, light, or frame limit".into());
+    }
+    if c.compare && !c.preview {
+        return Err("--compare requires --preview".into());
     }
     if c.preview && c.record.is_some() {
         return Err("--preview and --record cannot be combined".into());
@@ -144,7 +232,11 @@ fn output_command(c: &Config) -> Command {
             "warning",
             "-autoexit",
             "-window_title",
-            "Joscam Rust - Beauty Preview (Q / Esc to close)",
+            if c.compare {
+                "Joscam Rust - LEFT original / RIGHT beauty (Q / Esc to close)"
+            } else {
+                "Joscam Rust - Beauty Preview (Q / Esc to close)"
+            },
             "-f",
             "rawvideo",
             "-pixel_format",
@@ -197,7 +289,24 @@ fn output_command(c: &Config) -> Command {
     command
 }
 
+fn compare_frame(original: &[u8], processed: &mut [u8], width: usize) {
+    let half = width / 2 * 3;
+    for (source, target) in original
+        .chunks_exact(width * 3)
+        .zip(processed.chunks_exact_mut(width * 3))
+    {
+        target[..half].copy_from_slice(&source[..half]);
+    }
+}
+
 fn run(c: Config) -> Result<()> {
+    let mut tracker = match &c.face_model {
+        Some(path) => Some(
+            face::FaceTracker::with_landmarks(path, c.landmark_model.as_deref())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+        ),
+        None => None,
+    };
     let size = format!("{}x{}", c.width, c.height);
     let fps = c.fps.to_string();
     let mut capture = Command::new("ffmpeg");
@@ -244,10 +353,18 @@ fn run(c: Config) -> Result<()> {
     let mut count = 0;
     let mut beauty = beauty::Beauty::default();
     beauty.skin_brightening = c.skin_brightening;
+    beauty.rosy = c.rosy;
+    beauty.glow = c.glow;
+    beauty.lip_tint = c.lip_tint;
+    beauty.eye_brightening = c.eye_brightening;
     let mut processing_ms = 0.0;
     let mut report_at = std::time::Instant::now();
     let mut report_frames = 0;
-    eprintln!("Starting {}x{} at requested {} FPS. Beauty is a centered skin-color heuristic; keep your face centered.",c.width,c.height,c.fps);
+    let mut face_visible = false;
+    if tracker.is_some() {
+        eprintln!("Local face-box detection enabled; no detected face means no beauty effect.");
+    }
+    eprintln!("Starting {}x{} at requested {} FPS. Beauty uses a skin-color mask; face-box tracking is active when a model is selected.",c.width,c.height,c.fps);
     loop {
         if let Some(status) = sink.0.try_wait()? {
             if c.preview && status.success() {
@@ -266,9 +383,18 @@ fn run(c: Config) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
         let started = std::time::Instant::now();
+        if let Some(tracker) = &mut tracker {
+            let rect = tracker.update(&src, c.width, c.height);
+            face_visible = rect.is_some();
+            beauty.set_tracked_face(rect);
+            beauty.set_landmarks(tracker.landmarks().cloned());
+        }
         beauty.process(&src, &mut dst, c.width, c.height, c.strength, c.light);
         processing_ms += started.elapsed().as_secs_f64() * 1000.0;
         report_frames += 1;
+        if c.compare {
+            compare_frame(&src, &mut dst, c.width);
+        }
         if let Err(error) = target.write_all(&dst) {
             if c.preview && error.kind() == io::ErrorKind::BrokenPipe {
                 drop(target);
@@ -286,9 +412,21 @@ fn run(c: Config) -> Result<()> {
         count += 1;
         if report_at.elapsed().as_secs_f64() >= 2.0 {
             eprintln!(
-                "Video {:.1} FPS | beauty {:.2} ms/frame",
+                "Video {:.1} FPS | beauty {:.2} ms/frame | face {} | landmarks {}",
                 report_frames as f64 / report_at.elapsed().as_secs_f64(),
-                processing_ms / report_frames as f64
+                processing_ms / report_frames as f64,
+                if tracker.is_none() {
+                    "off"
+                } else if face_visible {
+                    "detected"
+                } else {
+                    "searching"
+                },
+                if tracker.as_ref().and_then(|t| t.landmarks()).is_some() {
+                    "ready"
+                } else {
+                    "off/searching"
+                }
             );
             processing_ms = 0.0;
             report_frames = 0;
@@ -415,5 +553,45 @@ mod youth_tests {
         ] {
             assert!(parse(args.into_iter().map(String::from)).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod kbeauty_tests {
+    use super::*;
+    #[test]
+    fn preset_enables_detector_and_explicit_controls_win() {
+        let c = parse(
+            ["--preset", "kbeauty", "--rosy", "0", "--glow", "0.2"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(c.face_model.is_some());
+        assert_eq!(c.rosy, 0.0);
+        assert_eq!(c.glow, 0.2);
+    }
+    #[test]
+    fn invalid_cosmetic_parameters_are_rejected() {
+        for args in [["--rosy", "NaN"], ["--glow", "-1"], ["--rosy", "1.1"]] {
+            assert!(parse(args.into_iter().map(String::from)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::*;
+    #[test]
+    fn comparison_preserves_original_left_and_processed_right() {
+        let original = vec![10; 8 * 4 * 3];
+        let mut processed = vec![200; original.len()];
+        compare_frame(&original, &mut processed, 8);
+        for row in processed.chunks_exact(24) {
+            assert_eq!(&row[..12], &[10; 12]);
+            assert_eq!(&row[12..], &[200; 12]);
+        }
+        assert!(parse(["--compare"].into_iter().map(String::from)).is_err());
     }
 }
