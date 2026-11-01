@@ -2,6 +2,8 @@
 /// not face tracking. Scratch storage and the spatial mask are reused.
 #[derive(Default)]
 pub struct Beauty {
+    /// Cosmetic lift toward white inside the existing skin mask, 0..1.
+    pub skin_brightening: f32,
     shape: (usize, usize),
     horizontal: Vec<f32>,
     blurred: Vec<f32>,
@@ -71,7 +73,8 @@ impl Beauty {
         dst.copy_from_slice(src);
         let amount = amount.clamp(0.0, 1.0);
         let light = light.clamp(0.0, 1.0);
-        if width == 0 || height == 0 || (amount == 0.0 && light == 0.0) {
+        let brightening = self.skin_brightening.clamp(0.0, 1.0);
+        if width == 0 || height == 0 || (amount == 0.0 && light == 0.0 && brightening == 0.0) {
             return;
         }
         self.prepare(width, height);
@@ -116,6 +119,9 @@ impl Beauty {
                         original
                     };
                     let target = target + light * 0.2 * target * (1.0 - target / 255.0);
+                    // A bounded blend toward white lifts and gently desaturates
+                    // skin, preserving channel ordering and highlight headroom.
+                    let target = target + (255.0 - target) * brightening * 0.35;
                     dst[i + c] = (original + (target - original) * mask)
                         .clamp(0.0, 255.0)
                         .round() as u8;
@@ -220,6 +226,40 @@ mod regression_tests {
                 "{w}x{h}: {:.2} ms/frame",
                 start.elapsed().as_secs_f64() * 1000.0 / 60.0
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod brightening_tests {
+    use super::*;
+    #[test]
+    fn brightening_is_local_monotonic_and_preserves_channel_order() {
+        let src = [170, 120, 100].repeat(64 * 48);
+        let mut low = src.clone();
+        let mut high = src.clone();
+        let mut filter = Beauty::default();
+        filter.skin_brightening = 0.3;
+        filter.process(&src, &mut low, 64, 48, 0.0, 0.0);
+        filter.skin_brightening = 0.8;
+        filter.process(&src, &mut high, 64, 48, 0.0, 0.0);
+        let i = (24 * 64 + 32) * 3;
+        for c in 0..3 {
+            assert!(high[i + c] > low[i + c]);
+            assert!(low[i + c] > src[i + c]);
+        }
+        assert!(high[i] > high[i + 1] && high[i + 1] > high[i + 2]);
+        assert_eq!(&high[..3], &src[..3]);
+    }
+    #[test]
+    fn brightening_keeps_non_skin_and_white_unchanged() {
+        let mut filter = Beauty::default();
+        filter.skin_brightening = 1.0;
+        for color in [[20, 40, 200], [255, 255, 255], [0, 0, 0]] {
+            let src = color.repeat(64 * 48);
+            let mut dst = src.clone();
+            filter.process(&src, &mut dst, 64, 48, 0.0, 0.0);
+            assert_eq!(src, dst);
         }
     }
 }
