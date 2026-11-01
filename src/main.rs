@@ -1,6 +1,7 @@
 mod beauty;
 mod face;
 mod features;
+mod glasses;
 mod landmarks;
 mod particles;
 use std::{
@@ -40,6 +41,7 @@ struct Config {
     preview: bool,
     compare: bool,
     particles: particles::Settings,
+    glasses: glasses::Settings,
 }
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let mut c = Config {
@@ -64,6 +66,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         preview: false,
         compare: false,
         particles: particles::Settings::default(),
+        glasses: glasses::Settings::default(),
     };
     let (mut lip_set, mut eye_set) = (false, false);
     let mut rosy_set = false;
@@ -73,7 +76,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--glasses off|round|square --glasses-size 1.0 (0.6..1.6)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--test-source" {
@@ -130,6 +133,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.eye_brightening = v.parse()?;
                 eye_set = true;
             }
+            "--glasses" => c.glasses.style = glasses::Style::parse(&v)?,
+            "--glasses-size" => c.glasses.size = v.parse()?,
             "--particles" => c.particles.mode = particles::Mode::parse(&v)?,
             "--particle-count" => c.particles.count = v.parse()?,
             "--particle-size" => c.particles.size = v.parse()?,
@@ -140,6 +145,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
         }
     }
     c.particles.validate()?;
+    c.glasses.validate()?;
     match preset.as_str() {
         "natural" => {}
         "youth" => {
@@ -183,6 +189,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
             }
         }
         _ => return Err("Preset must be natural, youth, or kbeauty".into()),
+    }
+    if c.glasses.style != glasses::Style::Off && c.landmark_model.is_none() {
+        c.landmark_model = Some("models/face_mesh_Nx3x192x192.onnx".into());
     }
     if c.landmark_model.is_some() && c.face_model.is_none() {
         c.face_model = Some("models/seeta_fd_frontal_v1.0.bin".into());
@@ -408,6 +417,13 @@ fn run(c: Config) -> Result<()> {
             particle_clock.elapsed().as_secs_f64(),
             c.particles,
             current_face,
+        );
+        glasses::render(
+            &mut dst,
+            c.width,
+            c.height,
+            tracker.as_ref().and_then(|t| t.landmarks()),
+            c.glasses,
         );
         processing_ms += started.elapsed().as_secs_f64() * 1000.0;
         report_frames += 1;
@@ -645,6 +661,32 @@ mod particle_cli_tests {
             ["--particle-count", "201"],
             ["--particle-size", "NaN"],
             ["--particle-speed", "4"],
+        ] {
+            assert!(parse(args.into_iter().map(String::from)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod glasses_cli_tests {
+    use super::*;
+    #[test]
+    fn enabling_glasses_enables_models_and_rejects_invalid_options() {
+        let c = parse(
+            ["--glasses", "square", "--glasses-size", "1.2"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c.glasses.style, glasses::Style::Square);
+        assert_eq!(c.glasses.size, 1.2);
+        assert!(c.landmark_model.is_some());
+        assert!(c.face_model.is_some());
+        for args in [
+            ["--glasses", "unknown"],
+            ["--glasses-size", "NaN"],
+            ["--glasses-size", "2"],
         ] {
             assert!(parse(args.into_iter().map(String::from)).is_err());
         }

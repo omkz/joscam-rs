@@ -315,3 +315,24 @@ after beauty and before the comparison split, so `--compare` keeps the original
 left half free of particles. For Chrome, remove `--preview` (and `--compare`);
 the same overlay is sent to the virtual camera. Particles alone do not require
 neural models or ONNX Runtime. Beauty presets retain their usual model setup.
+
+## Virtual glasses
+
+```bash
+cargo +1.85.1 run --release --locked -- --preview --preset kbeauty --glasses round
+cargo +1.85.1 run --release --locked -- --preview --glasses square --glasses-size 1.1
+```
+
+`--glasses` accepts `off` (default), `round`, or `square`. `--glasses-size` is
+0.6–1.6, default 1.0. Both styles are dark procedural frames with transparent
+lens interiors. They follow the centers/tilt of the eye landmarks and include a
+bridge and short temple arms. No extra model or image asset is downloaded.
+If not using K-Beauty, enabling glasses automatically enables the existing face
+and landmark model paths. Run `bash scripts/setup-beauty.sh` if not already set up.
+
+Glasses draw after beauty/particles and before the original/processed preview
+split. Remove `--preview` and `--compare` to send them to Chrome through the
+virtual camera. They can be combined with `--particles both`. Fresh valid
+landmarks are required; no landmark result means no glasses. This is a 2D
+overlay, not a fitted 3D object, so strong yaw, partial occlusion and rapid motion
+can reduce alignment. It does not replace or remove physical glasses.
