@@ -1,4 +1,4 @@
-//! Background face-box detection; no landmark or identity recognition.
+//! Background face detection and optional dense landmarks; no identity recognition.
 use std::{
     sync::mpsc::{self, Receiver, SyncSender, TrySendError},
     thread::{self, JoinHandle},
@@ -14,12 +14,16 @@ pub struct FaceRect {
 }
 struct Frame {
     gray: Vec<u8>,
+    rgb: Vec<u8>,
+    rgb_width: usize,
+    rgb_height: usize,
     width: u32,
     height: u32,
     captured: Instant,
 }
 struct Detection {
     rect: Option<FaceRect>,
+    landmarks: Option<crate::landmarks::Landmarks>,
     captured: Instant,
 }
 
@@ -30,9 +34,15 @@ pub struct FaceTracker {
     next_submit: Instant,
     updated: Option<Instant>,
     rect: Option<FaceRect>,
+    landmarks: Option<crate::landmarks::Landmarks>,
 }
 impl FaceTracker {
+    #[cfg(test)]
     pub fn new(path: &str) -> Result<Self, String> {
+        Self::with_landmarks(path, None)
+    }
+    pub fn with_landmarks(path: &str, mesh_path: Option<&str>) -> Result<Self, String> {
+        let mesh = mesh_path.map(crate::landmarks::FaceMesh::new).transpose()?;
         // Load before opening the webcam so a missing model is actionable.
         let model = rustface::load_model(path).map_err(|e| {
             format!("Cannot load face model {path}: {e}. Run: bash scripts/download-face-model.sh")
@@ -40,6 +50,7 @@ impl FaceTracker {
         let (tx, rx) = mpsc::sync_channel::<Frame>(1);
         let (out_tx, out_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
+            let mut warned = false;
             let mut detector = rustface::create_detector_with_model(model);
             detector.set_min_face_size(30);
             detector.set_score_thresh(2.5);
@@ -64,9 +75,24 @@ impl FaceTracker {
                             h: b.height() as f32 / frame.height as f32,
                         }
                     });
+                let landmarks = if let (Some(mesh), Some(rect)) = (&mesh, rect) {
+                    match mesh.infer(&frame.rgb, frame.rgb_width, frame.rgb_height, rect) {
+                        Ok(points) => points,
+                        Err(error) => {
+                            if !warned {
+                                eprintln!("Landmark inference failed: {error}");
+                                warned = true;
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 if out_tx
                     .send(Detection {
                         rect,
+                        landmarks,
                         captured: frame.captured,
                     })
                     .is_err()
@@ -82,11 +108,17 @@ impl FaceTracker {
             next_submit: Instant::now(),
             updated: None,
             rect: None,
+            landmarks: None,
         })
     }
     pub fn update(&mut self, rgb: &[u8], width: usize, height: usize) -> Option<FaceRect> {
         let now = Instant::now();
         while let Ok(result) = self.results.try_recv() {
+            self.landmarks = if now.duration_since(result.captured) <= Duration::from_millis(250) {
+                result.landmarks
+            } else {
+                None
+            };
             self.rect = if now.duration_since(result.captured) <= Duration::from_millis(350) {
                 match (self.rect, result.rect) {
                     (Some(old), Some(new))
@@ -112,6 +144,13 @@ impl FaceTracker {
             .map_or(true, |t| now.duration_since(t) > Duration::from_millis(350))
         {
             self.rect = None;
+            self.landmarks = None;
+        }
+        if self
+            .updated
+            .map_or(true, |t| now.duration_since(t) > Duration::from_millis(250))
+        {
+            self.landmarks = None;
         }
         if now >= self.next_submit {
             let w = width.min(256);
@@ -128,6 +167,9 @@ impl FaceTracker {
             if let Some(tx) = &self.input {
                 match tx.try_send(Frame {
                     gray,
+                    rgb: rgb.to_vec(),
+                    rgb_width: width,
+                    rgb_height: height,
                     width: w as u32,
                     height: h as u32,
                     captured: now,
@@ -136,12 +178,19 @@ impl FaceTracker {
                     Err(TrySendError::Disconnected(_)) => {
                         self.rect = None;
                         self.updated = None;
+                        self.landmarks = None;
                     }
                 }
             }
             self.next_submit = now + Duration::from_millis(100);
         }
+        if self.rect.is_none() {
+            self.landmarks = None;
+        }
         self.rect
+    }
+    pub fn landmarks(&self) -> Option<&crate::landmarks::Landmarks> {
+        self.landmarks.as_ref()
     }
 }
 impl Drop for FaceTracker {
@@ -177,6 +226,7 @@ mod regression_tests {
             worker: None,
             next_submit: Instant::now() + Duration::from_secs(5),
             updated: Some(Instant::now() - Duration::from_secs(1)),
+            landmarks: None,
             rect: Some(FaceRect {
                 x: 0.1,
                 y: 0.1,

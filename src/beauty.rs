@@ -6,6 +6,11 @@ pub struct Beauty {
     pub skin_brightening: f32,
     pub rosy: f32,
     pub glow: f32,
+    pub lip_tint: f32,
+    pub eye_brightening: f32,
+    landmarks: Option<crate::landmarks::Landmarks>,
+    lip_mask: Vec<f32>,
+    eye_mask: Vec<f32>,
     tracking: bool,
     face: Option<crate::face::FaceRect>,
     spatial_dirty: bool,
@@ -17,6 +22,14 @@ pub struct Beauty {
 }
 
 impl Beauty {
+    pub fn set_landmarks(&mut self, landmarks: Option<crate::landmarks::Landmarks>) {
+        let landmarks = landmarks.filter(|m| m.points.len() == 468);
+        if self.landmarks != landmarks {
+            self.spatial_dirty = true;
+        }
+        self.landmarks = landmarks;
+    }
+
     pub fn set_tracked_face(&mut self, face: Option<crate::face::FaceRect>) {
         if !self.tracking || self.face != face {
             self.spatial_dirty = true;
@@ -35,6 +48,10 @@ impl Beauty {
         self.blurred.resize(width * height * 3, 0.0);
         self.column_sums.resize(width * 3, 0.0);
         self.spatial.resize(width * height, 0.0);
+        self.lip_mask.resize(width * height, 0.0);
+        self.lip_mask.fill(0.0);
+        self.eye_mask.resize(width * height, 0.0);
+        self.eye_mask.fill(0.0);
         for y in 0..height {
             for x in 0..width {
                 let px = x as f32 / width as f32;
@@ -66,32 +83,52 @@ impl Beauty {
                 self.spatial[y * width + x] = mask;
             }
         }
+        if let Some(mesh) = &self.landmarks {
+            crate::features::masks(
+                mesh,
+                width,
+                height,
+                &mut self.spatial,
+                &mut self.lip_mask,
+                &mut self.eye_mask,
+            );
+        }
     }
 
     // Separable running sums: constant work per pixel instead of 25 RGB
     // range-weight evaluations. Clamp edges rather than introducing dark borders.
     fn blur(&mut self, src: &[u8], width: usize, height: usize) {
+        let radius = if let Some(face) = self.face {
+            (face.w * width as f32 * 0.025).round().clamp(2.0, 6.0) as usize
+        } else {
+            (height.min(width) / 150).clamp(2, 6)
+        };
+        let divisor = (2 * radius + 1) as f32;
         for y in 0..height {
             for c in 0..3 {
                 let at = |x: usize| src[(y * width + x) * 3 + c] as f32;
-                let mut sum = at(0) * 3.0 + at(1.min(width - 1)) + at(2.min(width - 1));
+                let mut sum = at(0) * (radius + 1) as f32;
+                for step in 1..=radius {
+                    sum += at(step.min(width - 1));
+                }
                 for x in 0..width {
-                    self.horizontal[(y * width + x) * 3 + c] = sum / 5.0;
-                    sum += at((x + 3).min(width - 1)) - at(x.saturating_sub(2));
+                    self.horizontal[(y * width + x) * 3 + c] = sum / divisor;
+                    sum += at((x + radius + 1).min(width - 1)) - at(x.saturating_sub(radius));
                 }
             }
         }
         let stride = width * 3;
         for i in 0..stride {
-            self.column_sums[i] = self.horizontal[i] * 3.0
-                + self.horizontal[1.min(height - 1) * stride + i]
-                + self.horizontal[2.min(height - 1) * stride + i];
+            self.column_sums[i] = self.horizontal[i] * (radius + 1) as f32;
+            for step in 1..=radius {
+                self.column_sums[i] += self.horizontal[step.min(height - 1) * stride + i];
+            }
         }
         for y in 0..height {
-            let add = (y + 3).min(height - 1) * stride;
-            let remove = y.saturating_sub(2) * stride;
+            let add = (y + radius + 1).min(height - 1) * stride;
+            let remove = y.saturating_sub(radius) * stride;
             for i in 0..stride {
-                self.blurred[y * stride + i] = self.column_sums[i] / 5.0;
+                self.blurred[y * stride + i] = self.column_sums[i] / divisor;
                 self.column_sums[i] += self.horizontal[add + i] - self.horizontal[remove + i];
             }
         }
@@ -116,7 +153,13 @@ impl Beauty {
         let glow = self.glow.clamp(0.0, 1.0);
         if width == 0
             || height == 0
-            || (amount == 0.0 && light == 0.0 && brightening == 0.0 && rosy == 0.0 && glow == 0.0)
+            || (amount == 0.0
+                && light == 0.0
+                && brightening == 0.0
+                && rosy == 0.0
+                && glow == 0.0
+                && self.lip_tint == 0.0
+                && self.eye_brightening == 0.0)
         {
             return;
         }
@@ -143,6 +186,16 @@ impl Beauty {
                     * ((135.0 - cb) / 12.0).clamp(0.0, 1.0)
                     * ((cr - 130.0) / 12.0).clamp(0.0, 1.0)
                     * ((185.0 - cr) / 12.0).clamp(0.0, 1.0);
+                // Dense geometry allows a broader skin mask. Protect dark hair
+                // and highly saturated pixels rather than dropping neutral skin.
+                let skin = if self.landmarks.is_some() {
+                    skin.max(0.65)
+                        * ((r.min(g).min(b) - 25.0) / 45.0).clamp(0.0, 1.0)
+                        * (1.0 - (r.max(g).max(b) - r.min(g).min(b) - 100.0).max(0.0) / 80.0)
+                            .clamp(0.0, 1.0)
+                } else {
+                    skin
+                };
                 let mask = skin * spatial;
                 if mask == 0.0 {
                     continue;
@@ -153,7 +206,7 @@ impl Beauty {
                     let delta = (self.blurred[i] - r).abs()
                         + (self.blurred[i + 1] - g).abs()
                         + (self.blurred[i + 2] - b).abs();
-                    (1.0 - delta / 45.0).clamp(0.0, 1.0)
+                    (1.0 - delta / 90.0).clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
@@ -164,16 +217,49 @@ impl Beauty {
                     } else {
                         original
                     };
-                    let target = target + light * 0.2 * target * (1.0 - target / 255.0);
+                    let target = target + light * 0.45 * target * (1.0 - target / 255.0);
                     // A bounded blend toward white lifts and gently desaturates
                     // skin, preserving channel ordering and highlight headroom.
-                    let target = target + (255.0 - target) * brightening * 0.35;
+                    let target = target + (255.0 - target) * brightening * 0.50;
                     let target = target + glow * 0.12 * target * (1.0 - target / 255.0);
                     let tint = [1.0, 0.10, 0.40][c];
                     let target = target + (255.0 - target) * rosy * 0.08 * tint;
                     dst[i + c] = (original + (target - original) * mask)
                         .clamp(0.0, 255.0)
                         .round() as u8;
+                }
+            }
+        }
+        if self.landmarks.is_some() {
+            self.apply_makeup(src, dst);
+        }
+    }
+    fn apply_makeup(&self, src: &[u8], dst: &mut [u8]) {
+        for (pixel, (original, out)) in src.chunks_exact(3).zip(dst.chunks_exact_mut(3)).enumerate()
+        {
+            let lip = self.lip_mask[pixel] * self.lip_tint.clamp(0.0, 1.0);
+            if lip > 0.0 {
+                let luminance = (0.299 * original[0] as f32
+                    + 0.587 * original[1] as f32
+                    + 0.114 * original[2] as f32)
+                    / 255.0;
+                let shade = 0.45 + luminance * 0.70;
+                for c in 0..3 {
+                    let tint = [210.0, 65.0, 100.0][c] * shade;
+                    out[c] = (out[c] as f32 * (1.0 - lip * 0.65) + tint * lip * 0.65)
+                        .clamp(0.0, 255.0)
+                        .round() as u8;
+                }
+            }
+            let eye = self.eye_mask[pixel] * self.eye_brightening.clamp(0.0, 1.0);
+            if eye > 0.0 {
+                let min = *original.iter().min().unwrap() as f32;
+                let max = *original.iter().max().unwrap() as f32;
+                let whites = ((min - 70.0) / 120.0).clamp(0.0, 1.0)
+                    * (1.0 - (max - min) / 100.0).clamp(0.0, 1.0);
+                for c in 0..3 {
+                    out[c] = (out[c] as f32 + (255.0 - out[c] as f32) * eye * whites * 0.30).round()
+                        as u8;
                 }
             }
         }
@@ -357,6 +443,35 @@ mod tracking_tests {
         assert!(dst[right] > src[right]);
         b.set_tracked_face(None);
         b.process(&src, &mut dst, 80, 60, 0.0, 0.0);
+        assert_eq!(src, dst);
+    }
+}
+
+#[cfg(test)]
+mod makeup_tests {
+    use super::*;
+    #[test]
+    fn lipstick_preserves_mouth_cavity_and_eye_effect_preserves_dark_pupils() {
+        let src = [130, 110, 105].repeat(10000);
+        let mut dst = src.clone();
+        let mut beauty = Beauty::default();
+        beauty.lip_tint = 1.0;
+        beauty.set_landmarks(Some(crate::features::tests::mesh()));
+        beauty.process(&src, &mut dst, 100, 100, 0.0, 0.0);
+        let lip = (76 * 100 + 50) * 3;
+        let mouth = (72 * 100 + 50) * 3;
+        assert_ne!(&dst[lip..lip + 3], &src[lip..lip + 3]);
+        assert_eq!(&dst[mouth..mouth + 3], &src[mouth..mouth + 3]);
+        beauty.lip_tint = 0.0;
+        beauty.eye_brightening = 1.0;
+        let src = [170, 170, 170].repeat(10000);
+        let mut dst = src.clone();
+        beauty.process(&src, &mut dst, 100, 100, 0.0, 0.0);
+        let eye = (38 * 100 + 35) * 3;
+        assert!(dst[eye] > src[eye]);
+        let src = [20, 20, 20].repeat(10000);
+        let mut dst = src.clone();
+        beauty.process(&src, &mut dst, 100, 100, 0.0, 0.0);
         assert_eq!(src, dst);
     }
 }

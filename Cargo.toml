@@ -7,3 +7,8 @@ description = "Local Linux virtual camera with adjustable cosmetic retouching"
 
 [dependencies]
 rustface = { version = "0.1.7", default-features = false }
+ort = { version = "=2.0.0-rc.8", default-features = false, features = ["load-dynamic", "half"] }
+ort-sys = "=2.0.0-rc.8"
+
+# Keep the runtime binding's half dependency compatible with older Rust.
+half = "=2.4.1"
