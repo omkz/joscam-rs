@@ -108,3 +108,25 @@ cargo test --release benchmark_beauty -- --ignored --nocapture
 Compare enabled beauty against `--strength 0 --light 0` on the same camera.
 Use `--release` for real-time use. Webcam quality and actual FPS must still be
 verified on your machine.
+
+## Local beauty preview
+
+Close any other application using your physical webcam, then run:
+
+```bash
+cargo run --release -- --preview --input /dev/video0 --strength 0.65 --light 0.3
+```
+
+A local window shows the processed video. Press **Q**, **Esc**, or close the
+window to stop the preview and release the camera. This standalone mode does
+not need v4l2loopback, Chrome, or OmeTV, and does not send video to the virtual
+camera. Remove `--preview` to use virtual output as before. It cannot be
+combined with `--record`. FFplay is supplied by Linux Mint's `ffmpeg` package;
+preview requires an active graphical desktop session. Strength and light are
+still command-line settings, not live sliders.
+
+Preview without physical hardware:
+
+```bash
+cargo run --release -- --preview --test-source --frames 90
+```
