@@ -5,6 +5,7 @@ pub enum Style {
     Off,
     Round,
     Square,
+    Sunglasses,
 }
 impl Style {
     pub fn parse(value: &str) -> Result<Self, String> {
@@ -12,7 +13,8 @@ impl Style {
             "off" => Ok(Self::Off),
             "round" => Ok(Self::Round),
             "square" => Ok(Self::Square),
-            _ => Err("Glasses must be off, round, or square".into()),
+            "sunglasses" => Ok(Self::Sunglasses),
+            _ => Err("Glasses must be off, round, square, or sunglasses".into()),
         }
     }
 }
@@ -78,7 +80,47 @@ fn line(frame: &mut [u8], w: usize, h: usize, a: Pixel, b: Pixel, thickness: f32
         }
     }
 }
-/// Frame-only rendering: leaves lens interiors transparent. No per-frame heap
+fn dark_lens(
+    frame: &mut [u8],
+    width: usize,
+    height: usize,
+    center: Pixel,
+    axis: Pixel,
+    normal: Pixel,
+    rx: f32,
+    ry: f32,
+) {
+    let bound = (rx * rx + ry * ry).sqrt() + 1.0;
+    let x0 = (center.x - bound).floor().clamp(0.0, width as f32) as usize;
+    let x1 = (center.x + bound).ceil().clamp(0.0, width as f32) as usize;
+    let y0 = (center.y - bound).floor().clamp(0.0, height as f32) as usize;
+    let y1 = (center.y + bound).ceil().clamp(0.0, height as f32) as usize;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let dx = x as f32 + 0.5 - center.x;
+            let dy = y as f32 + 0.5 - center.y;
+            let u = (dx * axis.x + dy * axis.y) / rx;
+            let v = (dx * normal.x + dy * normal.y) / ry;
+            let shape = u.powi(4) + v.powi(4);
+            let coverage = ((1.0 - shape) * rx.min(ry) * 0.25 + 0.5).clamp(0.0, 1.0);
+            if coverage == 0.0 {
+                continue;
+            }
+            let alpha = coverage * 0.91;
+            let top = (0.5 - v * 0.5).clamp(0.0, 1.0);
+            let reflection = (1.0 - (v + 0.45 - u * 0.25).abs() / 0.12).clamp(0.0, 1.0) * 0.10;
+            let i = (y * width + x) * 3;
+            for c in 0..3 {
+                let shade = [7.0, 9.0, 14.0][c]
+                    + top * [13.0, 15.0, 19.0][c]
+                    + reflection * [95.0, 105.0, 125.0][c];
+                frame[i + c] = (frame[i + c] as f32 * (1.0 - alpha) + shade * alpha).round() as u8;
+            }
+        }
+    }
+}
+
+/// Round/square lenses are transparent; sunglasses have a dark lens fill. No per-frame heap
 /// allocations, no drawing without fresh landmarks, no effect when disabled.
 pub fn render(
     frame: &mut [u8],
@@ -144,10 +186,13 @@ pub fn render(
         y: center.y + axis.y * x + normal.y * y,
     };
     for center in centers {
+        if settings.style == Style::Sunglasses {
+            dark_lens(frame, width, height, center, axis, normal, rx, ry);
+        }
         let at = |step: usize| {
             let theta = step as f32 / 64.0 * std::f32::consts::TAU;
             let (mut sy, mut sx) = theta.sin_cos();
-            if settings.style == Style::Square {
+            if settings.style != Style::Round {
                 sx = sx.signum() * sx.abs().sqrt();
                 sy = sy.signum() * sy.abs().sqrt();
             }
@@ -273,5 +318,32 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod sunglasses_tests {
+    use super::*;
+    #[test]
+    fn sunglasses_darken_lens_centers_without_changing_background() {
+        let mut points = vec![Point { x: 0.5, y: 0.5 }; 468];
+        for (i, x) in [(33, 0.30), (133, 0.40), (362, 0.60), (263, 0.70)] {
+            points[i] = Point { x, y: 0.4 };
+        }
+        let mesh = Landmarks { points };
+        let mut frame = vec![180; 200 * 200 * 3];
+        let settings = Settings {
+            style: Style::Sunglasses,
+            size: 1.0,
+        };
+        render(&mut frame, 200, 200, Some(&mesh), settings);
+        for x in [70, 130] {
+            assert!(frame[(80 * 200 + x) * 3] < 60);
+        }
+        assert_eq!(&frame[..3], &[180; 3]);
+        let mut absent = vec![180; frame.len()];
+        render(&mut absent, 200, 200, None, settings);
+        assert!(absent.iter().all(|&v| v == 180));
+        assert_eq!(Style::parse("sunglasses").unwrap(), Style::Sunglasses);
     }
 }

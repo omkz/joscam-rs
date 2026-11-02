@@ -323,9 +323,10 @@ cargo +1.85.1 run --release --locked -- --preview --preset kbeauty --glasses rou
 cargo +1.85.1 run --release --locked -- --preview --glasses square --glasses-size 1.1
 ```
 
-`--glasses` accepts `off` (default), `round`, or `square`. `--glasses-size` is
-0.6–1.6, default 1.0. Both styles are dark procedural frames with transparent
-lens interiors. They follow the centers/tilt of the eye landmarks and include a
+`--glasses` accepts `off` (default), `round`, `square`, or `sunglasses`. `--glasses-size` is
+0.6–1.6, default 1.0. Round and square are dark procedural frames with transparent
+lens interiors. Sunglasses use rounded-square frames with dark gradient lenses
+and a subtle reflected highlight. They follow the centers/tilt of the eye landmarks and include a
 bridge and short temple arms. No extra model or image asset is downloaded.
 If not using K-Beauty, enabling glasses automatically enables the existing face
 and landmark model paths. Run `bash scripts/setup-beauty.sh` if not already set up.
@@ -336,3 +337,13 @@ virtual camera. They can be combined with `--particles both`. Fresh valid
 landmarks are required; no landmark result means no glasses. This is a 2D
 overlay, not a fitted 3D object, so strong yaw, partial occlusion and rapid motion
 can reduce alignment. It does not replace or remove physical glasses.
+
+Sunglasses for Chrome/OmeTV:
+
+```bash
+cargo +1.85.1 run --release --locked -- \
+  --input /dev/video0 --output /dev/video2 \
+  --preset kbeauty --glasses sunglasses
+```
+
+Add `--preview` for a local preview. `--glasses-size` works for sunglasses too.
