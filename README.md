@@ -185,3 +185,23 @@ cargo +1.85.1 test --release --locked real_ -- --ignored --nocapture
 Rust source: MIT. FFmpeg, v4l2loopback, ONNX Runtime, and downloaded models have
 their own licenses. Model sources/digests are in `models/README.md`; notices are
 in `third-party/`. Review obligations before bundling a commercial installer.
+
+## Face and lip reshape
+
+Live panel sliders: **Face Slim** (0..1), **Chin** (-1..1, shorter to longer),
+and **Lip Fullness** (-1..1, thinner to fuller). All default to 0 and presets
+leave them neutral. CLI example:
+
+```bash
+cargo +1.85.1 run --release --locked -- --panel --preset kbeauty \
+  --face-slim 0.35 --chin -0.15 --lip-fullness 0.3
+```
+
+Reshape requires valid local landmarks and automatically selects the existing
+models. It applies bounded, feathered inverse warps after beauty/makeup and
+before glasses/particles, so lip color follows reshaped lips. Lip warps avoid
+sampling the detected inner mouth. No mesh means no reshape; malformed or strongly
+asymmetric geometry is skipped. Local anchor smoothing reduces small jumps but
+is not full optical-flow stabilization. Strong motion, open-mouth expressions,
+and profiles still require visual testing. Background/hair near the jaw may bend;
+start with small values. These are 2D cosmetic warps, not anatomical or 3D edits.
