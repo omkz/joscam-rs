@@ -3,6 +3,7 @@ mod face;
 mod features;
 mod glasses;
 mod landmarks;
+mod panel;
 mod particles;
 use std::{
     env,
@@ -19,7 +20,9 @@ impl Drop for Managed {
         let _ = self.0.wait();
     }
 }
+#[derive(Clone)]
 struct Config {
+    panel: bool,
     input: String,
     output: String,
     record: Option<String>,
@@ -45,6 +48,7 @@ struct Config {
 }
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let mut c = Config {
+        panel: false,
         input: "/dev/video0".into(),
         output: "/dev/video2".into(),
         record: None,
@@ -76,8 +80,12 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--glasses off|round|square|sunglasses --glasses-size 1.0 (0.6..1.6)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--panel (local control panel with simultaneous preview/output)\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--glasses off|round|square|sunglasses --glasses-size 1.0 (0.6..1.6)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
+        }
+        if arg == "--panel" {
+            c.panel = true;
+            continue;
         }
         if arg == "--test-source" {
             c.test = true;
@@ -142,6 +150,17 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
             "--preset" => preset = v,
             "--frames" => c.frames = Some(v.parse()?),
             _ => return Err(format!("Unknown option: {arg}").into()),
+        }
+    }
+    if c.panel {
+        if c.preview || c.record.is_some() || c.compare {
+            return Err("--panel cannot combine with --preview, --compare, or --record".into());
+        }
+        if !c.test {
+            c.face_model
+                .get_or_insert_with(|| "models/seeta_fd_frontal_v1.0.bin".into());
+            c.landmark_model
+                .get_or_insert_with(|| "models/face_mesh_Nx3x192x192.onnx".into());
         }
     }
     c.particles.validate()?;
@@ -316,13 +335,18 @@ fn compare_frame(original: &[u8], processed: &mut [u8], width: usize) {
     }
 }
 
-fn run(c: Config) -> Result<()> {
+fn run(mut c: Config) -> Result<()> {
     let mut tracker = match &c.face_model {
         Some(path) => Some(
             face::FaceTracker::with_landmarks(path, c.landmark_model.as_deref())
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
         ),
         None => None,
+    };
+    let panel = if c.panel {
+        Some(panel::Panel::start(c.clone())?)
+    } else {
+        None
     };
     let size = format!("{}x{}", c.width, c.height);
     let fps = c.fps.to_string();
@@ -363,8 +387,12 @@ fn run(c: Config) -> Result<()> {
     );
     let mut source = capture.0.stdout.take().ok_or("No capture pipe")?;
     let mut sink = output_command(&c);
-    let mut sink = Managed(sink.stdin(Stdio::piped()).spawn()?);
-    let mut target = sink.0.stdin.take().ok_or("No output pipe")?;
+    let mut sink = if c.panel {
+        None
+    } else {
+        Some(Managed(sink.stdin(Stdio::piped()).spawn()?))
+    };
+    let mut target = sink.as_mut().and_then(|s| s.0.stdin.take());
     let mut src = vec![0; c.width * c.height * 3];
     let mut dst = src.clone();
     let mut count = 0;
@@ -384,12 +412,44 @@ fn run(c: Config) -> Result<()> {
     }
     eprintln!("Starting {}x{} at requested {} FPS. Beauty uses a skin-color mask; face-box tracking is active when a model is selected.",c.width,c.height,c.fps);
     loop {
-        if let Some(status) = sink.0.try_wait()? {
-            if c.preview && status.success() {
-                eprintln!("Preview closed.");
-                return Ok(());
+        if let Some(panel) = &panel {
+            let (settings, enabled) = panel.settings();
+            c = settings;
+            beauty.skin_brightening = c.skin_brightening;
+            beauty.rosy = c.rosy;
+            beauty.glow = c.glow;
+            beauty.lip_tint = c.lip_tint;
+            beauty.eye_brightening = c.eye_brightening;
+            if !enabled {
+                target.take();
+                sink.take();
             }
-            return Err(format!("Output exited: {status}").into());
+            if enabled && sink.is_none() {
+                match output_command(&c).stdin(Stdio::piped()).spawn() {
+                    Ok(child) => {
+                        let mut child = Managed(child);
+                        target = child.0.stdin.take();
+                        sink = Some(child);
+                        panel.status("Virtual camera starting");
+                    }
+                    Err(e) => panel.fail(&format!("Cannot start virtual camera: {e}")),
+                }
+            }
+        }
+        if let Some(status) = sink.as_mut().map(|s| s.0.try_wait()).transpose()?.flatten() {
+            if let Some(panel) = &panel {
+                panel.fail(&format!(
+                    "Virtual output exited: {status}. Check v4l2loopback and terminal."
+                ));
+                target.take();
+                sink.take();
+            } else {
+                if c.preview && status.success() {
+                    eprintln!("Preview closed.");
+                    return Ok(());
+                }
+                return Err(format!("Output exited: {status}").into());
+            }
         }
         match source.read_exact(&mut src) {
             Ok(()) => {}
@@ -430,19 +490,39 @@ fn run(c: Config) -> Result<()> {
         if c.compare {
             compare_frame(&src, &mut dst, c.width);
         }
-        if let Err(error) = target.write_all(&dst) {
-            if c.preview && error.kind() == io::ErrorKind::BrokenPipe {
-                drop(target);
-                let status = sink.0.wait()?;
-                if status.success() {
-                    eprintln!("Preview closed.");
-                    return Ok(());
+        if let Some(panel) = &panel {
+            panel.frame(
+                &dst,
+                c.width,
+                c.height,
+                face_visible,
+                tracker.as_ref().and_then(|t| t.landmarks()).is_some(),
+            );
+        }
+        if let Some(writer) = &mut target {
+            if let Err(error) = writer.write_all(&dst) {
+                if let Some(panel) = &panel {
+                    panel.fail(&format!(
+                        "Virtual output failed: {error}. Check v4l2loopback and terminal."
+                    ));
+                    target.take();
+                    sink.take();
+                } else {
+                    if c.preview && error.kind() == io::ErrorKind::BrokenPipe {
+                        drop(target);
+                        let status = sink.as_mut().unwrap().0.wait()?;
+                        if status.success() {
+                            eprintln!("Preview closed.");
+                            return Ok(());
+                        }
+                        return Err(format!(
+                            "Preview exited: {status}; check FFplay/display errors above"
+                        )
+                        .into());
+                    }
+                    return Err(error.into());
                 }
-                return Err(
-                    format!("Preview exited: {status}; check FFplay/display errors above").into(),
-                );
             }
-            return Err(error.into());
         }
         count += 1;
         if report_at.elapsed().as_secs_f64() >= 2.0 {
@@ -472,9 +552,13 @@ fn run(c: Config) -> Result<()> {
         }
     }
     drop(target);
-    let status = sink.0.wait()?;
-    if !status.success() {
-        return Err(format!("Output failed: {status}").into());
+    let status = if let Some(sink) = &mut sink {
+        Some(sink.0.wait()?)
+    } else {
+        None
+    };
+    if status.is_some_and(|s| !s.success()) {
+        return Err(format!("Output failed: {status:?}").into());
     }
     eprintln!("Processed {count} frames.");
     Ok(())
