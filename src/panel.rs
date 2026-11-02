@@ -128,6 +128,8 @@ fn bmp(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
 }
 fn settings(c: &Config) -> Vec<(&'static str, String)> {
     vec![
+        ("filter", c.filter.style.name().into()),
+        ("filter-amount", c.filter.amount.to_string()),
         ("face-slim", c.reshape.slim.to_string()),
         ("chin", c.reshape.chin.to_string()),
         ("lip-fullness", c.reshape.lips.to_string()),
@@ -175,6 +177,7 @@ fn update(c: &Config, body: &str) -> std::result::Result<Config, String> {
         .map_err(|e| e.to_string())?
         .ok_or("Missing settings")?;
     let mut next = c.clone();
+    next.filter = parsed.filter;
     next.reshape = parsed.reshape;
     next.strength = parsed.strength;
     next.light = parsed.light;
@@ -332,11 +335,13 @@ mod tests {
         .unwrap();
         let next = update(
             &c,
-            "strength=0.9&glasses=sunglasses&face-slim=0.4&chin=-0.2&lip-fullness=0.3",
+            "strength=0.9&glasses=sunglasses&face-slim=0.4&chin=-0.2&lip-fullness=0.3&filter=retro&filter-amount=0.7",
         )
         .unwrap();
         assert_eq!(next.output, "/dev/video8");
         assert_eq!(next.strength, 0.9);
+        assert_eq!(next.filter.style, crate::filter::Style::Retro);
+        assert_eq!(next.filter.amount, 0.7);
         assert_eq!(next.reshape.slim, 0.4);
         assert_eq!(next.reshape.chin, -0.2);
         assert_eq!(next.reshape.lips, 0.3);

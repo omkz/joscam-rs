@@ -205,3 +205,21 @@ asymmetric geometry is skipped. Local anchor smoothing reduces small jumps but
 is not full optical-flow stabilization. Strong motion, open-mouth expressions,
 and profiles still require visual testing. Background/hair near the jaw may bend;
 start with small values. These are 2D cosmetic warps, not anatomical or 3D edits.
+
+## Retro / VHS filter
+
+In the panel select **Filter video → Retro / VHS**, then adjust **Intensitas retro**.
+Default filter is off; amount defaults to 0.65 (0..1). No extra model is needed.
+The look combines faded warm colors, reduced saturation, fine animated grain,
+subtle scanlines, vignette and a small RGB offset. It affects the entire output,
+including glasses/particles, and works with beauty or on its own:
+
+```bash
+cargo +1.85.1 run --release --locked -- --panel --preset kbeauty --filter retro
+cargo +1.85.1 run --release --locked -- --preview --filter retro --filter-amount 0.8
+```
+
+Set filter off or amount 0 for exact filter passthrough. Grain follows elapsed
+time without storing previous frames. The effect adds processing cost but no
+frame-history delay. Panel preview and virtual camera share the same filtered
+frame. This is a stylized look, not tape emulation or AI generation.

@@ -1,6 +1,7 @@
 mod beauty;
 mod face;
 mod features;
+mod filter;
 mod glasses;
 mod landmarks;
 mod panel;
@@ -24,6 +25,7 @@ impl Drop for Managed {
 #[derive(Clone)]
 struct Config {
     panel: bool,
+    filter: filter::Settings,
     reshape: reshape::Settings,
     input: String,
     output: String,
@@ -51,6 +53,7 @@ struct Config {
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let mut c = Config {
         panel: false,
+        filter: filter::Settings::default(),
         reshape: reshape::Settings::default(),
         input: "/dev/video0".into(),
         output: "/dev/video2".into(),
@@ -83,7 +86,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
     let (mut strength_set, mut light_set, mut brightening_set) = (false, false, false);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("Joscam Rust\n--panel (local control panel with simultaneous preview/output)\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--glasses off|round|square|sunglasses --glasses-size 1.0 (0.6..1.6)\n--face-slim 0..1 --chin -1..1 --lip-fullness -1..1 (neutral 0)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
+            println!("Joscam Rust\n--panel (local control panel with simultaneous preview/output)\n--input /dev/video0 --output /dev/video2\n--width 640 --height 480 --fps 30 --mjpeg\n--strength 0.55 --light 0.25 (0..1)\n--skin-brightening 0.0 (0..1)\n--preset natural|youth|kbeauty\n--rosy 0.0 --glow 0.0 (0..1)\n--face-model models/seeta_fd_frontal_v1.0.bin\n--landmark-model models/face_mesh_Nx3x192x192.onnx\n--lip-tint 0.0 --eye-brightening 0.0 (0..1)\n--record demo.mp4 (instead of virtual camera)\n--preview (local window instead of virtual camera; Q/Esc closes)\n--compare (preview: left original, right processed)\n--glasses off|round|square|sunglasses --glasses-size 1.0 (0.6..1.6)\n--filter off|retro --filter-amount 0.65 (0..1)\n--face-slim 0..1 --chin -1..1 --lip-fullness -1..1 (neutral 0)\n--particles off|sparkle|sakura|both\n--particle-count 40 --particle-size 1.0 --particle-speed 1.0\n--test-source --frames 60\nCtrl+C stops. Choose Joscam in Chrome camera settings.");
             return Ok(None);
         }
         if arg == "--panel" {
@@ -144,6 +147,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 c.eye_brightening = v.parse()?;
                 eye_set = true;
             }
+            "--filter" => c.filter.style = filter::Style::parse(&v)?,
+            "--filter-amount" => c.filter.amount = v.parse()?,
             "--face-slim" => c.reshape.slim = v.parse()?,
             "--chin" => c.reshape.chin = v.parse()?,
             "--lip-fullness" => c.reshape.lips = v.parse()?,
@@ -169,6 +174,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Config>> {
                 .get_or_insert_with(|| "models/face_mesh_Nx3x192x192.onnx".into());
         }
     }
+    c.filter.validate()?;
     c.reshape.validate()?;
     if c.reshape.active() && c.landmark_model.is_none() {
         c.landmark_model = Some("models/face_mesh_Nx3x192x192.onnx".into());
@@ -406,6 +412,7 @@ fn run(mut c: Config) -> Result<()> {
     let mut src = vec![0; c.width * c.height * 3];
     let mut dst = src.clone();
     let mut count = 0;
+    let mut filter = filter::Filter::default();
     let mut reshaper = reshape::Reshape::default();
     let mut beauty = beauty::Beauty::default();
     beauty.skin_brightening = c.skin_brightening;
@@ -502,6 +509,13 @@ fn run(mut c: Config) -> Result<()> {
             c.height,
             tracker.as_ref().and_then(|t| t.landmarks()),
             c.glasses,
+        );
+        filter.process(
+            &mut dst,
+            c.width,
+            c.height,
+            particle_clock.elapsed().as_secs_f64(),
+            c.filter,
         );
         processing_ms += started.elapsed().as_secs_f64() * 1000.0;
         report_frames += 1;
@@ -825,6 +839,31 @@ mod reshape_cli_tests {
             ["--face-slim", "-1"],
             ["--chin", "NaN"],
             ["--lip-fullness", "2"],
+        ] {
+            assert!(parse(args.into_iter().map(String::from)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod filter_cli_tests {
+    use super::*;
+    #[test]
+    fn filter_has_no_model_requirement_and_rejects_bad_values() {
+        let c = parse(
+            ["--filter", "retro", "--filter-amount", "0.8"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c.filter.style, filter::Style::Retro);
+        assert_eq!(c.filter.amount, 0.8);
+        assert!(c.face_model.is_none());
+        for args in [
+            ["--filter", "bad"],
+            ["--filter-amount", "NaN"],
+            ["--filter-amount", "1.1"],
         ] {
             assert!(parse(args.into_iter().map(String::from)).is_err());
         }
